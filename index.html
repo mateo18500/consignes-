@@ -6,19 +6,20 @@
   <title>Affichage des Consignes — Salle de Régulation</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    :root { --fs: 28px; } /* taille de base auto-ajustée par JS (entre 18 et 46 px) */
+    :root { --fs: 28px; } /* ajustée dynamiquement entre 18 et 46 px */
     html, body { height: 100%; }
     body { background: #000; color: #fff; font-size: var(--fs); }
-    .marquee { overflow: hidden; position: relative; }
+    .marquee { position: relative; overflow: hidden; }
     .marquee-content { position: absolute; width: 100%; }
     .card { background:#111; border:1px solid #262626; border-radius: 14px; overflow: hidden; }
     .card-head { padding: .6rem 1rem; color:#fff; }
     .card-body { padding: 1rem; }
     .hud { color:#a3a3a3; }
+    .empty { border:1px dashed #404040; border-radius: 14px; padding:2rem; text-align:center; color:#a3a3a3; }
   </style>
 </head>
 <body>
-  <!-- En-tête minimal -->
+  <!-- En-tête -->
   <header class="sticky top-0 z-10 bg-black/70 backdrop-blur border-b border-neutral-800">
     <div class="w-full px-4 py-2 flex items-center justify-between">
       <div class="flex items-center gap-3">
@@ -31,11 +32,13 @@
     </div>
   </header>
 
-  <!-- Conteneur plein écran -->
+  <!-- Contenu plein écran -->
   <main id="screen" class="w-full" style="height: calc(100vh - 56px);">
     <section class="h-full p-3 marquee border-t border-neutral-800">
       <div id="marquee" class="marquee-content space-y-3"></div>
+      <div id="empty" class="empty hidden">Aucune consigne active pour le moment</div>
     </section>
+
     <div id="toast" class="hidden fixed bottom-6 right-6 bg-emerald-600 text-white px-4 py-3 rounded-xl shadow-lg">
       🆕 Nouvelle consigne ajoutée
     </div>
@@ -47,10 +50,10 @@
 
     // Réglages
     const SPEED_PX_PER_S = 40;      // vitesse de défilement vertical
-    const TOAST_DURATION_MS = 4000; // durée toast
-    const MIN_FS = 18;              // taille min texte (px)
-    const MAX_FS = 46;              // taille max texte (px)
-    const FIT_PAD = 0.92;           // marge pour éviter d’être trop juste (92% de la hauteur)
+    const TOAST_DURATION_MS = 4000; // durée du toast
+    const MIN_FS = 18;              // taille min
+    const MAX_FS = 46;              // taille max
+    const FIT_PAD = 0.92;           // laisse ~8% de marge en bas
 
     // Config Firebase — PROJET: consignes-ba836
     const firebaseConfig = {
@@ -69,6 +72,7 @@
     const marquee = document.getElementById('marquee');
     const screen = document.getElementById('screen');
     const toast = document.getElementById('toast');
+    const empty = document.getElementById('empty');
 
     function escapeHtml(str=''){return str.replace(/[&<>"]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
@@ -90,7 +94,7 @@
       return wrap;
     }
 
-    // Filtrage par programmation: startAt <= now < endAt (si présents)
+    // Actif si startAt <= now < endAt (quand défini)
     function isActiveNow(item, now) {
       const startOk = !item.startAt || now >= item.startAt;
       const endOk   = !item.endAt   || now <  item.endAt;
@@ -104,20 +108,30 @@
       const data = snap.val() || {};
       const now = Date.now();
 
+      // Liste complète
       const listAll = Object.entries(data).map(([id, v]) => ({ id, ...v }));
-      // Filtrer uniquement celles actives maintenant
+
+      // 👉 Filtre actives PUIS tri **récents → anciens**
       const actives = listAll
         .filter(it => isActiveNow(it, now))
-        .sort((a, b) => (a.order ?? a.createdAt ?? 0) - (b.order ?? b.createdAt ?? 0)); // ordre d’affichage
+        .sort((a, b) => (b.createdAt ?? b.order ?? 0) - (a.createdAt ?? a.order ?? 0));
 
-      const currentKeys = new Set(listAll.map(x => x.id));
+      // Détection de nouveautés (peu importe actives ou pas)
+      const currentKeys = new Set(Object.keys(data));
       const isNew = [...currentKeys].some(k => !lastKeys.has(k)) && lastKeys.size > 0;
       lastKeys = currentKeys;
 
+      // Rendu
       marquee.innerHTML = '';
-      actives.forEach(item => marquee.appendChild(renderConsigne(item)));
+      if (actives.length === 0) {
+        empty.classList.remove('hidden');
+      } else {
+        empty.classList.add('hidden');
+        actives.forEach(item => marquee.appendChild(renderConsigne(item)));
+      }
+
       startMarquee();
-      autoFitText(); // ajuste la taille du texte après rendu
+      autoFitText(); // ajuste la taille du texte
 
       if (isNew) showToast();
     });
@@ -134,18 +148,18 @@
         content.style.top = '0px';
         return;
       }
-      let y = visible;
+      let y = 0; // on démarre en haut pour voir d’abord la plus récente
       content.style.top = y + 'px';
       const step = () => {
         y -= SPEED_PX_PER_S / 60;
-        if (y <= -totalHeight) y = visible;
+        if (y <= - (totalHeight - visible)) y = 0; // boucle en revenant au début
         content.style.top = y + 'px';
         animId = requestAnimationFrame(step);
       };
       animId = requestAnimationFrame(step);
     }
 
-    // Ajuste automatiquement la taille de la police pour optimiser la lisibilité
+    // Ajuste automatiquement la taille de la police pour la lisibilité
     function autoFitText() {
       const container = screen.querySelector('.marquee');
       const content = marquee;
