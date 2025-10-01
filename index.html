@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Affichage des Consignes — Salle de Régulation</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root { --fs: 28px; } /* taille de base auto-ajustée par JS (entre 18 et 46 px) */
+    html, body { height: 100%; }
+    body { background: #000; color: #fff; font-size: var(--fs); }
+    .marquee { overflow: hidden; position: relative; }
+    .marquee-content { position: absolute; width: 100%; }
+    .card { background:#111; border:1px solid #262626; border-radius: 14px; overflow: hidden; }
+    .card-head { padding: .6rem 1rem; color:#fff; }
+    .card-body { padding: 1rem; }
+    .hud { color:#a3a3a3; }
+  </style>
+</head>
+<body>
+  <!-- En-tête minimal -->
+  <header class="sticky top-0 z-10 bg-black/70 backdrop-blur border-b border-neutral-800">
+    <div class="w-full px-4 py-2 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <img src="logo.png" alt="Logo" class="w-8 h-8" onerror="this.style.display='none'" />
+        <h1 class="text-xl font-semibold">Affichage des consignes</h1>
+      </div>
+      <div class="hud text-sm">
+        <span id="clock" class="font-mono"></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Conteneur plein écran -->
+  <main id="screen" class="w-full" style="height: calc(100vh - 56px);">
+    <section class="h-full p-3 marquee border-t border-neutral-800">
+      <div id="marquee" class="marquee-content space-y-3"></div>
+    </section>
+    <div id="toast" class="hidden fixed bottom-6 right-6 bg-emerald-600 text-white px-4 py-3 rounded-xl shadow-lg">
+      🆕 Nouvelle consigne ajoutée
+    </div>
+  </main>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+    import { getDatabase, ref, onValue } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-database.js";
+
+    // Réglages
+    const SPEED_PX_PER_S = 40;      // vitesse de défilement vertical
+    const TOAST_DURATION_MS = 4000; // durée toast
+    const MIN_FS = 18;              // taille min texte (px)
+    const MAX_FS = 46;              // taille max texte (px)
+    const FIT_PAD = 0.92;           // marge pour éviter d’être trop juste (92% de la hauteur)
+
+    // Config Firebase — PROJET: consignes-ba836
+    const firebaseConfig = {
+      apiKey: "AIzaSyDB6J47M51E4lX-8VxBoLmAzaF9xwW6BW0",
+      authDomain: "consignes-ba836.firebaseapp.com",
+      databaseURL: "https://consignes-ba836-default-rtdb.europe-west1.firebasedatabase.app",
+      projectId: "consignes-ba836",
+      storageBucket: "consignes-ba836.appspot.com",
+      messagingSenderId: "1075015242857",
+      appId: "1:1075015242857:web:417d11f0d17177e0c83ef8"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+
+    const marquee = document.getElementById('marquee');
+    const screen = document.getElementById('screen');
+    const toast = document.getElementById('toast');
+
+    function escapeHtml(str=''){return str.replace(/[&<>"]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+    function renderConsigne(item) {
+      const { titre, contenuHtml, couleur, createdAt } = item;
+      const date = createdAt ? new Date(createdAt).toLocaleString('fr-FR') : '';
+      const wrap = document.createElement('article');
+      wrap.className = 'card';
+
+      wrap.innerHTML = `
+        <header class="card-head" style="background:${couleur || '#111827'}">
+          <h3 class="font-semibold">${escapeHtml(titre || 'Sans titre')}</h3>
+          <div class="text-xs opacity-90">${escapeHtml(date)}</div>
+        </header>
+        <div class="card-body">
+          <div class="prose prose-invert max-w-none">${contenuHtml || ''}</div>
+        </div>
+      `;
+      return wrap;
+    }
+
+    // Filtrage par programmation: startAt <= now < endAt (si présents)
+    function isActiveNow(item, now) {
+      const startOk = !item.startAt || now >= item.startAt;
+      const endOk   = !item.endAt   || now <  item.endAt;
+      return startOk && endOk;
+    }
+
+    const consignesRef = ref(db, 'consignes');
+    let lastKeys = new Set();
+
+    onValue(consignesRef, (snap) => {
+      const data = snap.val() || {};
+      const now = Date.now();
+
+      const listAll = Object.entries(data).map(([id, v]) => ({ id, ...v }));
+      // Filtrer uniquement celles actives maintenant
+      const actives = listAll
+        .filter(it => isActiveNow(it, now))
+        .sort((a, b) => (a.order ?? a.createdAt ?? 0) - (b.order ?? b.createdAt ?? 0)); // ordre d’affichage
+
+      const currentKeys = new Set(listAll.map(x => x.id));
+      const isNew = [...currentKeys].some(k => !lastKeys.has(k)) && lastKeys.size > 0;
+      lastKeys = currentKeys;
+
+      marquee.innerHTML = '';
+      actives.forEach(item => marquee.appendChild(renderConsigne(item)));
+      startMarquee();
+      autoFitText(); // ajuste la taille du texte après rendu
+
+      if (isNew) showToast();
+    });
+
+    let animId = null;
+    function startMarquee() {
+      cancelAnimationFrame(animId);
+      const content = marquee;
+      const container = screen.querySelector('.marquee');
+      const totalHeight = content.scrollHeight;
+      const visible = container.clientHeight;
+
+      if (totalHeight <= visible) {
+        content.style.top = '0px';
+        return;
+      }
+      let y = visible;
+      content.style.top = y + 'px';
+      const step = () => {
+        y -= SPEED_PX_PER_S / 60;
+        if (y <= -totalHeight) y = visible;
+        content.style.top = y + 'px';
+        animId = requestAnimationFrame(step);
+      };
+      animId = requestAnimationFrame(step);
+    }
+
+    // Ajuste automatiquement la taille de la police pour optimiser la lisibilité
+    function autoFitText() {
+      const container = screen.querySelector('.marquee');
+      const content = marquee;
+
+      // 1) commence grand, puis réduit si ça dépasse
+      let fs = MAX_FS;
+      setRootFs(fs);
+      let tries = 0;
+      while (content.scrollHeight > container.clientHeight * FIT_PAD && fs > MIN_FS && tries < 50) {
+        fs -= 2;
+        setRootFs(fs);
+        tries++;
+      }
+
+      // 2) s'il reste beaucoup de place, remonte un peu
+      tries = 0;
+      while (content.scrollHeight < container.clientHeight * 0.75 && fs < MAX_FS && tries < 30) {
+        fs += 2;
+        setRootFs(fs);
+        tries++;
+      }
+    }
+
+    function setRootFs(px) {
+      document.documentElement.style.setProperty('--fs', px + 'px');
+    }
+
+    window.addEventListener('resize', () => {
+      startMarquee();
+      autoFitText();
+    });
+
+    // Horloge
+    const clock = document.getElementById('clock');
+    setInterval(() => {
+      clock.textContent = new Date().toLocaleString('fr-FR');
+    }, 1000);
+
+    function showToast() {
+      toast.classList.remove('hidden');
+      setTimeout(() => toast.classList.add('hidden'), TOAST_DURATION_MS);
+    }
+  </script>
+</body>
+</html>
